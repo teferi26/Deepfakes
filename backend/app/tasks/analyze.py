@@ -1,8 +1,11 @@
 """
 Task de Celery para análisis de contenido multimedia.
 
-Usa el detector de imágenes basado en UniversalFakeDetect (CLIP ViT-L/14)
-para identificar contenido sintético/manipulado.
+Usa un ensemble de detectores para identificar contenido sintético/manipulado:
+- CLIPDetector (UniversalFakeDetect) - Generaliza entre GANs y Diffusion
+- CNNDetector (ResNet50) - Detecta artefactos de upsampling
+- FrequencyDetector (FFT/DCT) - Analiza espectro de frecuencias
+- MetadataDetector (EXIF/JPEG) - Analiza metadatos y estructura
 """
 
 import logging
@@ -57,7 +60,7 @@ def analyze_media(self, media_type: Literal["image", "video"], reference: str) -
 
 
 def _analyze_image(reference: str, start_time: float) -> dict:
-    """Analiza una imagen con el detector CLIP."""
+    """Analiza una imagen con el ensemble de detectores."""
     logger.info(f"Analizando imagen: {reference}")
     
     # Descargar imagen de MinIO
@@ -65,25 +68,59 @@ def _analyze_image(reference: str, start_time: float) -> dict:
     if image_data is None:
         raise ValueError(f"No se pudo descargar el archivo: {reference}")
     
-    # Ejecutar detector
+    # Ejecutar detector ensemble
     detector = get_image_detector()
     result = detector.analyze(image_data)
     
     elapsed = time.time() - start_time
+    
+    # Extraer información del ensemble
+    ensemble_size = result['details'].get('ensemble_size', 1)
+    individual_results = result.get('individual_results', [])
+    
+    # Construir explicación detallada
+    explanation_parts = [
+        f"Análisis realizado con ensemble de {ensemble_size} detectores.",
+        f"Confianza: {result['confidence']}.",
+    ]
+    
+    if individual_results:
+        detector_summaries = []
+        for ir in individual_results:
+            detector_summaries.append(
+                f"{ir.get('detector_name', 'unknown')}: {ir.get('probability', 0):.1%}"
+            )
+        explanation_parts.append(f"Detectores: {', '.join(detector_summaries)}.")
+    
+    if 'original_size' in result['details']:
+        explanation_parts.append(f"Tamaño: {result['details']['original_size']}.")
+    
     logger.info(f"Análisis completado en {elapsed:.2f}s - Probabilidad: {result['probability']:.3f}")
     
     return {
         "probability": result["probability"],
         "media_type": "image",
         "suspected": result["suspected_type"],
-        "explanation": f"Análisis realizado con {result['details']['model']}. "
-                      f"Confianza: {result['confidence']}. "
-                      f"Tamaño original: {result['details']['original_size']}.",
-        "model_version": result["details"]["model_version"],
+        "explanation": " ".join(explanation_parts),
+        "model_version": result["details"].get("model_version", "ensemble-v1"),
         "reference": reference,
         "processing_time_seconds": round(elapsed, 2),
         "is_synthetic": result["is_synthetic"],
         "confidence": result["confidence"],
+        "ensemble_details": {
+            "ensemble_size": ensemble_size,
+            "failed_detectors": result['details'].get('failed_detectors', 0),
+            "probability_std": result['details'].get('probability_std', 0),
+            "individual_results": [
+                {
+                    "name": ir.get("detector_name"),
+                    "probability": round(ir.get("probability", 0), 4),
+                    "confidence": ir.get("confidence"),
+                    "weight": round(ir.get("weight", 0), 3),
+                }
+                for ir in individual_results
+            ] if individual_results else None,
+        },
     }
 
 
@@ -161,11 +198,11 @@ def _analyze_video(reference: str, start_time: float) -> dict:
         "probability": avg_probability,
         "media_type": "video",
         "suspected": suspected,
-        "explanation": f"Análisis de {len(frames)} frames. "
+        "explanation": f"Análisis de {len(frames)} frames con ensemble de detectores. "
                       f"Probabilidad promedio: {avg_probability:.1%}. "
                       f"Máxima en frame: {max_probability:.1%}. "
                       f"Varianza: {variance:.4f}.",
-        "model_version": "UniversalFakeDetect-v1-video",
+        "model_version": "ensemble-v1-video",
         "reference": reference,
         "processing_time_seconds": round(elapsed, 2),
         "is_synthetic": avg_probability > 0.5,
