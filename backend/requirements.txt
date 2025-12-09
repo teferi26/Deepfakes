@@ -11,3 +11,15 @@ bcrypt==4.1.2
 sqlalchemy==2.0.29
 asyncpg==0.29.0
 psycopg2-binary==2.9.9
+
+# ML / Deep Learning para detección de imágenes IA
+torch==2.2.2
+torchvision==0.17.2
+Pillow==10.3.0
+ftfy==6.2.0
+regex==2024.4.16
+tqdm==4.66.2
+open-clip-torch==2.24.0
+
+# Video processing
+opencv-python-headless==4.9.0.80
