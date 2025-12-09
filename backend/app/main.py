@@ -1,10 +1,20 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from celery.result import AsyncResult
 
 from .config import settings
-from .schemas import AnalyzeRequest, JobResponse
+from .schemas import AnalyzeRequest, JobResponse, UploadResponse
 from .tasks.analyze import analyze_media
+from .storage import upload_file
+
+# Límites de tamaño
+MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20 MB
+MAX_VIDEO_SIZE = 200 * 1024 * 1024  # 200 MB
+
+# Tipos MIME permitidos
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_VIDEO_TYPES = {"video/mp4", "video/quicktime", "video/x-msvideo"}
+ALLOWED_TYPES = ALLOWED_IMAGE_TYPES | ALLOWED_VIDEO_TYPES
 
 app = FastAPI(title="Fraud Detector API", version="0.1.0")
 
@@ -20,6 +30,54 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.post("/v1/upload", response_model=UploadResponse)
+async def upload_media(file: UploadFile = File(...)):
+    """
+    Sube imagen o video, valida tipo y tamaño, almacena en S3/MinIO.
+    Devuelve referencia del objeto y encola análisis automáticamente.
+    """
+    content_type = file.content_type or ""
+    
+    if content_type not in ALLOWED_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tipo de archivo no permitido: {content_type}. Permitidos: {', '.join(ALLOWED_TYPES)}"
+        )
+    
+    # Determinar tipo de medio y límite
+    if content_type in ALLOWED_IMAGE_TYPES:
+        media_type = "image"
+        max_size = MAX_IMAGE_SIZE
+    else:
+        media_type = "video"
+        max_size = MAX_VIDEO_SIZE
+    
+    # Leer archivo y validar tamaño
+    contents = await file.read()
+    if len(contents) > max_size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Archivo demasiado grande. Máximo: {max_size // (1024*1024)} MB"
+        )
+    
+    # Subir a S3/MinIO
+    from io import BytesIO
+    file_obj = BytesIO(contents)
+    result = upload_file(file_obj, file.filename or "unknown", content_type)
+    
+    # Encolar análisis automáticamente
+    task = analyze_media.delay(media_type, result["object_key"])
+    
+    return UploadResponse(
+        object_key=result["object_key"],
+        hash=result["hash"],
+        size=result["size"],
+        media_type=media_type,
+        job_id=task.id,
+        status="queued"
+    )
 
 
 @app.post("/v1/analyze", response_model=JobResponse)
