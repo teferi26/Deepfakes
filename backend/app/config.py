@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
-from typing import List
+from pydantic import Field, field_validator
+from typing import List, Any
 
 
 class Settings(BaseSettings):
@@ -10,6 +10,13 @@ class Settings(BaseSettings):
 
     secret_key: str = Field(default="changeme", alias="SECRET_KEY")
     allowed_origins: List[str] = Field(default=["*"], alias="ALLOWED_ORIGINS")
+
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def parse_origins(cls, v: Any) -> List[str]:
+        if isinstance(v, str):
+            return [o.strip() for o in v.split(",") if o.strip()]
+        return v
 
     postgres_user: str = Field(default="fraudapp", alias="POSTGRES_USER")
     postgres_password: str = Field(default="fraudpass", alias="POSTGRES_PASSWORD")
