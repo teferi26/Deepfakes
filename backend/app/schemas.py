@@ -1,5 +1,6 @@
 from typing import Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
+from datetime import datetime
 
 
 class AnalyzeRequest(BaseModel):
@@ -20,3 +21,35 @@ class UploadResponse(BaseModel):
     media_type: Literal["image", "video"] = Field(description="Tipo de medio detectado")
     job_id: str = Field(description="ID del job de análisis encolado")
     status: str = Field(description="Estado inicial del job")
+
+
+# Auth schemas
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, description="Mínimo 8 caracteres")
+
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int = Field(description="Segundos hasta expiración")
+
+
+class UserResponse(BaseModel):
+    id: str
+    email: EmailStr
+    role: str
+    api_key: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class APIKeyResponse(BaseModel):
+    api_key: str
