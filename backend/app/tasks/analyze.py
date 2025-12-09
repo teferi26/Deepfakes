@@ -10,10 +10,14 @@ Usa un ensemble de detectores para identificar contenido sintético/manipulado:
 
 import logging
 import time
-from typing import Literal
+import uuid
+from datetime import datetime
+from typing import Literal, Optional
 
 from ..celery_app import celery
 from ..storage import download_file
+from ..database import SessionLocal
+from ..models import Analysis, AnalysisStatus
 
 logger = logging.getLogger(__name__)
 
@@ -31,32 +35,127 @@ def get_image_detector():
     return _image_detector
 
 
+def _create_analysis_record(
+    db, 
+    job_id: str, 
+    user_id: str, 
+    object_key: str, 
+    media_type: str
+) -> Analysis:
+    """Crea un registro de análisis pendiente en la base de datos."""
+    analysis = Analysis(
+        id=uuid.uuid4(),
+        user_id=uuid.UUID(user_id),
+        job_id=job_id,
+        object_key=object_key,
+        media_type=media_type,
+        status=AnalysisStatus.processing,
+        model_version="ensemble-v1",
+        created_at=datetime.utcnow(),
+    )
+    db.add(analysis)
+    db.commit()
+    db.refresh(analysis)
+    return analysis
+
+
+def _update_analysis_result(db, analysis: Analysis, result: dict):
+    """Actualiza el registro de análisis con los resultados."""
+    analysis.status = AnalysisStatus.completed
+    analysis.probability = result.get("probability")
+    analysis.is_synthetic = result.get("is_synthetic")
+    analysis.confidence = result.get("confidence")
+    analysis.suspected_type = result.get("suspected")
+    analysis.model_version = result.get("model_version", "ensemble-v1")
+    analysis.processing_time_seconds = result.get("processing_time_seconds")
+    analysis.completed_at = datetime.utcnow()
+    
+    # Guardar detalles completos incluyendo resultados individuales
+    analysis.result_details = {
+        "ensemble_details": result.get("ensemble_details"),
+        "explanation": result.get("explanation"),
+        "reference": result.get("reference"),
+    }
+    
+    db.commit()
+
+
+def _mark_analysis_failed(db, analysis: Analysis, error: str):
+    """Marca el análisis como fallido."""
+    analysis.status = AnalysisStatus.failed
+    analysis.error_message = error[:500]
+    analysis.completed_at = datetime.utcnow()
+    db.commit()
+
+
 @celery.task(name="analyze.media", bind=True, max_retries=3)
-def analyze_media(self, media_type: Literal["image", "video"], reference: str) -> dict:
+def analyze_media(
+    self, 
+    media_type: Literal["image", "video"], 
+    reference: str,
+    user_id: Optional[str] = None
+) -> dict:
     """
     Analiza un archivo multimedia para detectar manipulación/IA.
     
     Args:
         media_type: Tipo de medio ("image" o "video")
         reference: object_key del archivo en MinIO/S3
+        user_id: ID del usuario para guardar en historial (opcional)
     
     Returns:
         Dict con resultados del análisis
     """
     start_time = time.time()
+    job_id = self.request.id
+    
+    # Crear registro de análisis si tenemos user_id
+    db = None
+    analysis = None
+    if user_id:
+        try:
+            db = SessionLocal()
+            analysis = _create_analysis_record(db, job_id, user_id, reference, media_type)
+            logger.info(f"Creado registro de análisis {analysis.id} para job {job_id}")
+        except Exception as e:
+            logger.error(f"Error creando registro de análisis: {e}")
+            if db:
+                db.close()
+                db = None
     
     try:
         if media_type == "image":
-            return _analyze_image(reference, start_time)
+            result = _analyze_image(reference, start_time)
         elif media_type == "video":
-            return _analyze_video(reference, start_time)
+            result = _analyze_video(reference, start_time)
         else:
             raise ValueError(f"Tipo de medio no soportado: {media_type}")
+        
+        # Actualizar registro con resultados
+        if analysis and db:
+            try:
+                _update_analysis_result(db, analysis, result)
+                logger.info(f"Actualizado registro de análisis {analysis.id}")
+            except Exception as e:
+                logger.error(f"Error actualizando registro de análisis: {e}")
+        
+        return result
             
     except Exception as e:
         logger.error(f"Error analizando {media_type} {reference}: {e}")
+        
+        # Marcar como fallido en la base de datos
+        if analysis and db:
+            try:
+                _mark_analysis_failed(db, analysis, str(e))
+            except Exception as db_error:
+                logger.error(f"Error marcando análisis como fallido: {db_error}")
+        
         # Reintentar en caso de error transitorio
         raise self.retry(exc=e, countdown=5)
+    finally:
+        if db:
+            db.close()
 
 
 def _analyze_image(reference: str, start_time: float) -> dict:

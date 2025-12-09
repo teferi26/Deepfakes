@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -13,12 +13,14 @@ from ..auth import (
 )
 from ..deps import get_current_user
 from ..models import User
+from ..rate_limiting import limiter, RATE_LIMITS
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register(data: UserCreate, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMITS["auth"])
+def register(request: Request, data: UserCreate, db: Session = Depends(get_db)):
     """Registra un nuevo usuario."""
     existing = get_user_by_email(db, data.email)
     if existing:
@@ -38,7 +40,8 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=Token)
-def login(data: UserLogin, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMITS["auth"])
+def login(request: Request, data: UserLogin, db: Session = Depends(get_db)):
     """Inicia sesión y devuelve JWT token."""
     user = authenticate_user(db, data.email, data.password)
     if not user:
@@ -55,7 +58,8 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
 
 
 @router.get("/me", response_model=UserResponse)
-def get_me(current_user: User = Depends(get_current_user)):
+@limiter.limit(RATE_LIMITS["default"])
+def get_me(request: Request, current_user: User = Depends(get_current_user)):
     """Obtiene información del usuario actual."""
     return UserResponse(
         id=str(current_user.id),

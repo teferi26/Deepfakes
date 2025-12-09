@@ -12,6 +12,13 @@ sqlalchemy==2.0.29
 asyncpg==0.29.0
 psycopg2-binary==2.9.9
 
+# Rate limiting
+slowapi==0.1.9
+
+# PDF generation
+reportlab==4.2.0
+python-dateutil==2.9.0
+
 # ML / Deep Learning para detección de imágenes IA
 numpy==1.26.4
 torch==2.2.2

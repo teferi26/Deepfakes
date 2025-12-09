@@ -44,3 +44,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Retorna la instancia singleton de configuración."""
+    return settings

@@ -53,3 +53,51 @@ class UserResponse(BaseModel):
 
 class APIKeyResponse(BaseModel):
     api_key: str
+
+
+# Analysis History schemas
+class AnalysisResponse(BaseModel):
+    """Respuesta completa de un análisis"""
+    id: str
+    job_id: str
+    object_key: str
+    media_type: str
+    status: str
+    probability: Optional[float] = None
+    is_synthetic: Optional[bool] = None
+    confidence: Optional[str] = None
+    suspected_type: Optional[str] = None
+    model_version: Optional[str] = None
+    result_details: Optional[dict] = None
+    processing_time_seconds: Optional[float] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AnalysisListItem(BaseModel):
+    """Item resumido para listado de análisis"""
+    id: str
+    job_id: str
+    media_type: str
+    status: str
+    probability: Optional[float] = None
+    is_synthetic: Optional[bool] = None
+    confidence: Optional[str] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AnalysisListResponse(BaseModel):
+    """Respuesta paginada de listado de análisis"""
+    items: list[AnalysisListItem]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
