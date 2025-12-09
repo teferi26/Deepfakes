@@ -13,6 +13,7 @@ asyncpg==0.29.0
 psycopg2-binary==2.9.9
 
 # ML / Deep Learning para detección de imágenes IA
+numpy==1.26.4
 torch==2.2.2
 torchvision==0.17.2
 Pillow==10.3.0
