@@ -2,14 +2,12 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
+import bcrypt
 import jwt
-from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .models import User
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Configuración JWT
 JWT_ALGORITHM = "HS256"
@@ -18,12 +16,16 @@ JWT_EXPIRATION_HOURS = 24
 
 def hash_password(password: str) -> str:
     """Hash de contraseña con bcrypt."""
-    return pwd_context.hash(password)
+    password_bytes = password.encode('utf-8')
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password_bytes, salt).decode('utf-8')
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifica contraseña contra hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    password_bytes = plain_password.encode('utf-8')
+    hashed_bytes = hashed_password.encode('utf-8')
+    return bcrypt.checkpw(password_bytes, hashed_bytes)
 
 
 def generate_api_key() -> str:
