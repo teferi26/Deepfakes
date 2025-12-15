@@ -422,7 +422,8 @@ def train_clip_head_global(self) -> dict:
             train_acc = _acc(model, x_train, y_train)
             val_acc = _acc(model, x_val, y_val) if x_val.shape[0] > 0 else None
             
-            logger.info(f"Attempt {attempt_idx+1}/{attempts}: lr={lr}, hidden={hidden_dim}, dropout={dropout} -> train_acc={train_acc:.4f}, val_acc={val_acc:.4f if val_acc else 'N/A'}")
+            val_acc_str = f"{val_acc:.4f}" if val_acc is not None else "N/A"
+            logger.info(f"Attempt {attempt_idx+1}/{attempts}: lr={lr}, hidden={hidden_dim}, dropout={dropout} -> train_acc={train_acc:.4f}, val_acc={val_acc_str}")
 
             if best["val_acc"] is None:
                 is_better = True
