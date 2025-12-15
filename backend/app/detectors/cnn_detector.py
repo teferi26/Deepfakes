@@ -47,7 +47,8 @@ class CNNDetector(BaseImageDetector):
     
     name = "cnn_detect"
     version = "1.0.0"
-    default_weight = 0.25  # Peso reducido porque usa pesos no específicos
+    # Peso medio: refuerza a CLIP pero no domina el ensemble
+    default_weight = 0.25
     
     _instance: Optional['CNNDetector'] = None
     _initialized: bool = False

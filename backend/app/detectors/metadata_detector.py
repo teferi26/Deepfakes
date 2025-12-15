@@ -36,7 +36,8 @@ class MetadataDetector(BaseImageDetector):
     
     name = "metadata_analysis"
     version = "1.0.0"
-    default_weight = 0.10  # Peso bajo, solo complementario
+    # Peso muy bajo: solo debe inclinar ligeramente cuando hay evidencia fuerte
+    default_weight = 0.02
     
     # Software de edición conocido
     EDITING_SOFTWARE = [
@@ -211,18 +212,17 @@ class MetadataDetector(BaseImageDetector):
         if software_info["has_camera_info"]:
             score -= 0.2
         
-        # Sin metadatos EXIF → ligeramente sospechoso (pero común en internet)
-        # Reducido de 0.15 a 0.05 para ser más conservador
+        # Sin metadatos EXIF → muy ligeramente sospechoso (pero común en internet)
         if not exif:
-            score += 0.05
+            score += 0.02
         
-        # JPEG sin JFIF ni EXIF → más sospechoso (pero no determinante)
+        # JPEG sin JFIF ni EXIF → algo sospechoso (pero no determinante)
         if jpeg_info["is_jpeg"] and not jpeg_info["has_jfif"] and not jpeg_info["has_exif"]:
-            score += 0.05
+            score += 0.02
         
         # Múltiples compresiones
         if jpeg_info["multiple_compressions_likely"]:
-            score += 0.05
+            score += 0.02
         
         return max(0.0, min(1.0, score))
     

@@ -21,13 +21,21 @@ python-dateutil==2.9.0
 
 # ML / Deep Learning para detección de imágenes IA
 numpy==1.26.4
-torch==2.2.2
-torchvision==0.17.2
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
 Pillow==10.3.0
 ftfy==6.2.0
 regex==2024.4.16
-tqdm==4.66.2
+tqdm==4.66.4
 open-clip-torch==2.24.0
+
+# Dataset ingestion (Hugging Face)
+datasets==2.20.0
+huggingface_hub==0.24.6
+
+# HTTP client (scripts/tooling)
+requests==2.32.3
 
 # Video processing
 opencv-python-headless==4.9.0.80

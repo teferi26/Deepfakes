@@ -20,6 +20,7 @@ from .clip_detector import CLIPDetector
 from .cnn_detector import CNNDetector
 from .frequency_detector import FrequencyDetector
 from .metadata_detector import MetadataDetector
+from .calibrator import EnsembleCalibrator
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ class EnsembleDetector(BaseImageDetector):
         
         self.detectors: List[BaseImageDetector] = []
         self._available = False
+        self._calibrator = EnsembleCalibrator(name="ensemble_calibrator_global")
         
         try:
             self._initialize_detectors()
@@ -132,7 +134,7 @@ class EnsembleDetector(BaseImageDetector):
         if not valid_results:
             raise RuntimeError("Todos los detectores fallaron")
         
-        # Calcular probabilidad ponderada
+        # Calcular probabilidad ponderada (raw)
         total_weight = sum(r["weight"] for r in valid_results)
         weighted_prob = sum(
             r["probability"] * r["weight"] 
@@ -146,14 +148,14 @@ class EnsembleDetector(BaseImageDetector):
             for r in valid_results
         ) / (total_weight * 1.0)  # Normalizar aproximadamente
         
-        # Promedio de ambas métricas
-        final_probability = (weighted_prob + confidence_weighted_prob) / 2
-        final_probability = max(0.0, min(1.0, final_probability))
+        # Promedio de ambas métricas (raw)
+        raw_probability = (weighted_prob + confidence_weighted_prob) / 2
+        raw_probability = max(0.0, min(1.0, raw_probability))
         
         # Determinar confianza del ensemble
         # Alta si hay consenso, baja si hay divergencia
         probs = [r["probability"] for r in valid_results]
-        prob_std = (sum((p - final_probability)**2 for p in probs) / len(probs)) ** 0.5
+        prob_std = (sum((p - raw_probability)**2 for p in probs) / len(probs)) ** 0.5
         
         if prob_std < 0.1 and len(valid_results) >= 3:
             confidence = "high"
@@ -161,15 +163,54 @@ class EnsembleDetector(BaseImageDetector):
             confidence = "medium"
         else:
             confidence = "low"
+
+        # Aplicar calibrador entrenable (si existe). Usa sólo señales ya calculadas.
+        # Features (10): p_clip,p_cnn,p_freq,p_meta, masks(4), raw_prob, prob_std
+        det_probs = {r.get("detector_name"): float(r.get("probability", 0.5)) for r in valid_results}
+
+        def _p(name: str) -> tuple[float, float]:
+            if name in det_probs:
+                return float(det_probs[name]), 1.0
+            return 0.5, 0.0
+
+        p_clip, m_clip = _p("clip_universal")
+        p_cnn, m_cnn = _p("cnn_detect")
+        p_freq, m_freq = _p("frequency_analysis")
+        p_meta, m_meta = _p("metadata_analysis")
+
+        features = [
+            p_clip, p_cnn, p_freq, p_meta,
+            m_clip, m_cnn, m_freq, m_meta,
+            float(raw_probability), float(prob_std),
+        ]
+
+        calibrated_probability = self._calibrator.predict_probability(features)
+        final_probability = calibrated_probability if calibrated_probability is not None else raw_probability
         
-        # Determinar tipo sospechado basado en probabilidad
-        if final_probability > 0.75:
+        # Determinar veredicto IA/no-IA y tipo sospechado basado en probabilidad
+        # Umbrales AJUSTADOS para reducir tasa de inconclusive (target ≤3%):
+        #   - <= 0.40 → se considera NO generada por IA
+        #   - >= 0.60 → se considera generada por IA
+        #   - en medio → zona gris (inconclusiva) - ahora más estrecha
+        # Configurable via env vars para ajuste fino
+        import os
+        threshold_low = float(os.getenv("ENSEMBLE_THRESHOLD_LOW", "0.40"))
+        threshold_high = float(os.getenv("ENSEMBLE_THRESHOLD_HIGH", "0.60"))
+        
+        if final_probability >= threshold_high:
+            ai_decision = "ai_generated"
+        elif final_probability <= threshold_low:
+            ai_decision = "not_ai_generated"
+        else:
+            ai_decision = "inconclusive"
+
+        if final_probability > 0.8:
             suspected_type = "AI-generated (high confidence)"
-        elif final_probability > 0.6:
+        elif final_probability > 0.65:
             suspected_type = "Likely AI-generated or heavily manipulated"
-        elif final_probability > 0.45:
+        elif final_probability > 0.5:
             suspected_type = "Possibly manipulated (inconclusive)"
-        elif final_probability > 0.3:
+        elif final_probability > 0.35:
             suspected_type = "Minor modifications possible"
         else:
             suspected_type = "Likely authentic"
@@ -177,7 +218,10 @@ class EnsembleDetector(BaseImageDetector):
         # Construir respuesta
         return {
             "probability": final_probability,
+            # is_synthetic mantiene el umbral clásico 0.5 para compatibilidad,
+            # mientras que ai_decision usa umbrales más agresivos.
             "is_synthetic": final_probability > 0.5,
+            "ai_decision": ai_decision,
             "confidence": confidence,
             "suspected_type": suspected_type,
             "details": {
@@ -186,6 +230,8 @@ class EnsembleDetector(BaseImageDetector):
                 "probability_std": prob_std,
                 "model": "Ensemble v1.0",
                 "model_version": self.version,
+                "probability_raw": raw_probability,
+                "calibrator_version": (self._calibrator.info().version if self._calibrator.info() else None),
             },
             "individual_results": valid_results,
         }

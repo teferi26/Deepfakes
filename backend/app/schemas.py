@@ -65,6 +65,7 @@ class AnalysisResponse(BaseModel):
     status: str
     probability: Optional[float] = None
     is_synthetic: Optional[bool] = None
+    ai_decision: Optional[str] = None
     confidence: Optional[str] = None
     suspected_type: Optional[str] = None
     model_version: Optional[str] = None
@@ -86,6 +87,7 @@ class AnalysisListItem(BaseModel):
     status: str
     probability: Optional[float] = None
     is_synthetic: Optional[bool] = None
+    ai_decision: Optional[str] = None
     confidence: Optional[str] = None
     created_at: datetime
     completed_at: Optional[datetime] = None
@@ -101,3 +103,61 @@ class AnalysisListResponse(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+# Feedback schemas
+class AnalysisFeedbackCreate(BaseModel):
+    label: Literal["ai_generated", "not_ai_generated"]
+    comment: Optional[str] = Field(default=None, max_length=500)
+
+
+class UserCalibrationResponse(BaseModel):
+    threshold_low: float
+    threshold_high: float
+    samples_total: int
+    samples_ai: int
+    samples_not_ai: int
+
+
+class AnalysisFeedbackResponse(BaseModel):
+    id: str
+    analysis_id: str
+    label: str
+    was_model_correct: Optional[bool] = None
+    probability_at_time: Optional[float] = None
+    ai_decision_at_time: Optional[str] = None
+    created_at: datetime
+    calibration: Optional[UserCalibrationResponse] = None
+
+
+# Dataset / Training schemas
+class DatasetUploadResponse(BaseModel):
+    object_key: str
+    filename: Optional[str] = None
+    label: Literal["ai_generated", "not_ai_generated"]
+    source: str
+
+
+class DatasetBulkUploadResponse(BaseModel):
+    label: Literal["ai_generated", "not_ai_generated"]
+    source: str
+    total_entries: int
+    uploaded: int
+    skipped: int
+    failed: int
+    error_samples: list[str] = []
+
+
+class DatasetBulkAutoUploadResponse(BaseModel):
+    source: str
+    total_entries: int
+    uploaded_ai_generated: int
+    uploaded_not_ai_generated: int
+    skipped: int
+    failed: int
+    error_samples: list[str] = []
+
+
+class TrainModelResponse(BaseModel):
+    job_id: str
+    status: str

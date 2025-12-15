@@ -64,6 +64,8 @@ def _update_analysis_result(db, analysis: Analysis, result: dict):
     analysis.status = AnalysisStatus.completed
     analysis.probability = result.get("probability")
     analysis.is_synthetic = result.get("is_synthetic")
+    # Decisión IA/NO IA (con umbral calibrado si aplica)
+    # Se guarda en result_details; no añadimos columna para mantener compatibilidad.
     analysis.confidence = result.get("confidence")
     analysis.suspected_type = result.get("suspected")
     analysis.model_version = result.get("model_version", "ensemble-v1")
@@ -72,9 +74,12 @@ def _update_analysis_result(db, analysis: Analysis, result: dict):
     
     # Guardar detalles completos incluyendo resultados individuales
     analysis.result_details = {
+        "ai_decision": result.get("ai_decision"),
+        "decision_thresholds": result.get("decision_thresholds"),
         "ensemble_details": result.get("ensemble_details"),
         "explanation": result.get("explanation"),
         "reference": result.get("reference"),
+        "media_type": result.get("media_type"),
     }
     
     db.commit()
@@ -112,11 +117,13 @@ def analyze_media(
     # Crear registro de análisis si tenemos user_id
     db = None
     analysis = None
+    analysis_id = None
     if user_id:
         try:
             db = SessionLocal()
             analysis = _create_analysis_record(db, job_id, user_id, reference, media_type)
             logger.info(f"Creado registro de análisis {analysis.id} para job {job_id}")
+            analysis_id = str(analysis.id)
         except Exception as e:
             logger.error(f"Error creando registro de análisis: {e}")
             if db:
@@ -131,6 +138,33 @@ def analyze_media(
         else:
             raise ValueError(f"Tipo de medio no soportado: {media_type}")
         
+        # Inyectar analysis_id para que el frontend pueda enviar feedback
+        if analysis_id:
+            result["analysis_id"] = analysis_id
+
+        # Aplicar umbral calibrado por usuario si existe
+        if analysis_id and db:
+            try:
+                from ..models import UserCalibration
+                calibration = db.query(UserCalibration).filter(UserCalibration.user_id == uuid.UUID(user_id)).first()
+                threshold_low = float(calibration.threshold_low) if calibration else 0.35
+                threshold_high = float(calibration.threshold_high) if calibration else 0.65
+
+                prob = result.get("probability")
+                if prob is not None:
+                    if prob >= threshold_high:
+                        result["ai_decision"] = "ai_generated"
+                    elif prob <= threshold_low:
+                        result["ai_decision"] = "not_ai_generated"
+                    else:
+                        result["ai_decision"] = "inconclusive"
+                result["decision_thresholds"] = {
+                    "threshold_low": threshold_low,
+                    "threshold_high": threshold_high,
+                }
+            except Exception as e:
+                logger.warning(f"No se pudo aplicar calibración de usuario: {e}")
+
         # Actualizar registro con resultados
         if analysis and db:
             try:
@@ -205,17 +239,28 @@ def _analyze_image(reference: str, start_time: float) -> dict:
         "reference": reference,
         "processing_time_seconds": round(elapsed, 2),
         "is_synthetic": result["is_synthetic"],
+        "ai_decision": result.get("ai_decision"),
         "confidence": result["confidence"],
         "ensemble_details": {
             "ensemble_size": ensemble_size,
             "failed_detectors": result['details'].get('failed_detectors', 0),
             "probability_std": result['details'].get('probability_std', 0),
+            "probability_raw": result['details'].get('probability_raw'),
+            "calibrator_version": result['details'].get('calibrator_version'),
             "individual_results": [
                 {
                     "name": ir.get("detector_name"),
                     "probability": round(ir.get("probability", 0), 4),
                     "confidence": ir.get("confidence"),
                     "weight": round(ir.get("weight", 0), 3),
+                    "extra": (
+                        {
+                            "head_version": (ir.get("details") or {}).get("head_version"),
+                            "head_source": (ir.get("details") or {}).get("head_source"),
+                        }
+                        if ir.get("detector_name") == "clip_universal" and isinstance(ir.get("details"), dict)
+                        else None
+                    ),
                 }
                 for ir in individual_results
             ] if individual_results else None,

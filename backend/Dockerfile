@@ -33,6 +33,7 @@ RUN mkdir -p /app/app/detectors/weights
 # Copiar código
 COPY app ./app
 COPY download_weights.py .
+COPY scripts ./scripts
 
 # Pre-descargar pesos del modelo para evitar descarga en runtime
 RUN python download_weights.py || echo "Weights will be downloaded on first use"

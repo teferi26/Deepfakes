@@ -32,9 +32,12 @@ export default function FileUploader({ onUploadComplete, onAuthRequired }: FileU
   const [state, setState] = useState<UploadState>('idle');
   const [error, setError] = useState<string | null>(null);
   const [jobResult, setJobResult] = useState<JobResponse | null>(null);
+  const [feedbackStatus, setFeedbackStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
   
   const inputRef = useRef<HTMLInputElement>(null);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const pollStartTimeRef = useRef<number | null>(null);
 
   const isVideo = selectedFile?.type.startsWith('video/');
 
@@ -60,6 +63,8 @@ export default function FileUploader({ onUploadComplete, onAuthRequired }: FileU
     setError(null);
     setState('idle');
     setJobResult(null);
+    setFeedbackStatus('idle');
+    setFeedbackError(null);
 
     // Generate preview
     if (file.type.startsWith('image/')) {
@@ -101,6 +106,8 @@ export default function FileUploader({ onUploadComplete, onAuthRequired }: FileU
     setState('idle');
     setError(null);
     setJobResult(null);
+    setFeedbackStatus('idle');
+    setFeedbackError(null);
     setUploadProgress(0);
     if (inputRef.current) inputRef.current.value = '';
     if (pollIntervalRef.current) {
@@ -109,32 +116,93 @@ export default function FileUploader({ onUploadComplete, onAuthRequired }: FileU
     }
   }, []);
 
+  const getVerdict = (result: JobResponse | null) => {
+    const decision = result?.result?.ai_decision;
+    if (decision === 'ai_generated') {
+      return { label: 'Hecho con IA', tone: 'red' as const };
+    }
+    if (decision === 'not_ai_generated') {
+      return { label: 'NO hecho con IA', tone: 'green' as const };
+    }
+    if (decision === 'inconclusive') {
+      return { label: 'Inconcluso', tone: 'yellow' as const };
+    }
+    // Fallback si el backend aún no lo manda
+    const p = result?.result?.probability;
+    if (typeof p === 'number') {
+      if (p >= 0.65) return { label: 'Hecho con IA', tone: 'red' as const };
+      if (p <= 0.35) return { label: 'NO hecho con IA', tone: 'green' as const };
+      return { label: 'Inconcluso', tone: 'yellow' as const };
+    }
+    return { label: 'Inconcluso', tone: 'yellow' as const };
+  };
+
+  const handleFeedback = useCallback(async (label: 'ai_generated' | 'not_ai_generated') => {
+    const analysisId = jobResult?.result?.analysis_id;
+    if (!analysisId) {
+      setFeedbackStatus('error');
+      setFeedbackError('No se pudo asociar el análisis para feedback (falta analysis_id).');
+      return;
+    }
+    try {
+      setFeedbackStatus('sending');
+      setFeedbackError(null);
+      await api.submitFeedback(analysisId, label);
+      setFeedbackStatus('sent');
+    } catch (e: any) {
+      setFeedbackStatus('error');
+      setFeedbackError(e?.message || 'Error enviando feedback');
+    }
+  }, [jobResult]);
+
   const pollJobStatus = useCallback(async (jobId: string) => {
+    const MAX_POLL_TIME = 5 * 60 * 1000; // 5 minutos máximo para análisis
+    pollStartTimeRef.current = Date.now();
+    
     const poll = async () => {
+      // Check timeout
+      if (pollStartTimeRef.current && Date.now() - pollStartTimeRef.current > MAX_POLL_TIME) {
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+        setState('error');
+        setError('El análisis tardó demasiado. Por favor, intenta de nuevo.');
+        return;
+      }
+      
       try {
         const job = await api.getJob(jobId);
-        if (job.status === 'done' || job.status === 'failed') {
+        // Celery returns: pending, started, success, failure, retry, revoked
+        // Map to our states
+        const status = job.status.toLowerCase();
+        
+        if (status === 'success' || status === 'done') {
           if (pollIntervalRef.current) {
             clearInterval(pollIntervalRef.current);
             pollIntervalRef.current = null;
           }
           
-          if (job.status === 'done') {
-            setState('success');
-            setJobResult(job);
-            onUploadComplete?.(job);
-          } else {
-            setState('error');
-            setError('El análisis falló. Intenta de nuevo.');
+          setState('success');
+          setJobResult(job);
+          onUploadComplete?.(job);
+        } else if (status === 'failure' || status === 'failed' || status === 'revoked') {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
           }
+          
+          setState('error');
+          setError('El análisis falló. Intenta de nuevo.');
         }
+        // For pending, started, retry - keep polling
       } catch (err) {
         console.error('Error polling job:', err);
       }
     };
 
-    // Poll every 2 seconds
-    pollIntervalRef.current = setInterval(poll, 2000);
+    // Poll every 3 seconds (más tiempo para evitar sobrecarga)
+    pollIntervalRef.current = setInterval(poll, 3000);
     poll(); // Initial check
   }, [onUploadComplete]);
 
@@ -302,11 +370,14 @@ export default function FileUploader({ onUploadComplete, onAuthRequired }: FileU
 
             {/* Success result */}
             {state === 'success' && jobResult?.result && (
+              (() => {
+                const verdict = getVerdict(jobResult);
+                return (
               <div className={clsx(
                 'mb-4 p-4 rounded-lg border',
-                jobResult.result.probability > 0.7 
-                  ? 'bg-red-50 border-red-200' 
-                  : jobResult.result.probability > 0.4 
+                verdict.tone === 'red'
+                  ? 'bg-red-50 border-red-200'
+                  : verdict.tone === 'yellow'
                     ? 'bg-yellow-50 border-yellow-200'
                     : 'bg-green-50 border-green-200'
               )}>
@@ -315,15 +386,18 @@ export default function FileUploader({ onUploadComplete, onAuthRequired }: FileU
                   <span className="font-medium text-slate-800">Análisis completado</span>
                 </div>
                 <div className="mt-3">
+                  <p className="text-sm text-slate-600">
+                    <span className="font-medium">Veredicto:</span> {verdict.label}
+                  </p>
                   <p className="text-sm text-slate-600 mb-1">Probabilidad de manipulación:</p>
                   <div className="flex items-center gap-3">
                     <div className="flex-1 h-3 bg-slate-200 rounded-full overflow-hidden">
                       <div 
                         className={clsx(
                           'h-full transition-all duration-500',
-                          jobResult.result.probability > 0.7 
-                            ? 'bg-red-500' 
-                            : jobResult.result.probability > 0.4 
+                          verdict.tone === 'red'
+                            ? 'bg-red-500'
+                            : verdict.tone === 'yellow'
                               ? 'bg-yellow-500'
                               : 'bg-green-500'
                         )}
@@ -332,9 +406,9 @@ export default function FileUploader({ onUploadComplete, onAuthRequired }: FileU
                     </div>
                     <span className={clsx(
                       'font-bold text-lg',
-                      jobResult.result.probability > 0.7 
-                        ? 'text-red-600' 
-                        : jobResult.result.probability > 0.4 
+                      verdict.tone === 'red'
+                        ? 'text-red-600'
+                        : verdict.tone === 'yellow'
                           ? 'text-yellow-600'
                           : 'text-green-600'
                     )}>
@@ -350,8 +424,43 @@ export default function FileUploader({ onUploadComplete, onAuthRequired }: FileU
                   <p className="text-xs text-slate-400 mt-2">
                     Modelo: {jobResult.result.model_version} • Ref: {jobResult.result.reference}
                   </p>
+
+                  {/* Feedback */}
+                  <div className="mt-4">
+                    <p className="text-sm text-slate-700 font-medium mb-2">¿El veredicto fue correcto?</p>
+
+                    {feedbackStatus === 'sent' ? (
+                      <p className="text-sm text-slate-600">Gracias, feedback guardado.</p>
+                    ) : (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleFeedback('ai_generated')}
+                          disabled={feedbackStatus === 'sending'}
+                          className="flex-1 px-3 py-2 bg-slate-100 text-slate-800 rounded-lg font-medium hover:bg-slate-200 transition-colors disabled:opacity-60"
+                        >
+                          Es IA
+                        </button>
+                        <button
+                          onClick={() => handleFeedback('not_ai_generated')}
+                          disabled={feedbackStatus === 'sending'}
+                          className="flex-1 px-3 py-2 bg-slate-100 text-slate-800 rounded-lg font-medium hover:bg-slate-200 transition-colors disabled:opacity-60"
+                        >
+                          No es IA
+                        </button>
+                      </div>
+                    )}
+
+                    {feedbackStatus === 'error' && feedbackError && (
+                      <p className="text-xs text-red-600 mt-2">{feedbackError}</p>
+                    )}
+                    {jobResult.result.analysis_id && (
+                      <p className="text-xs text-slate-400 mt-2">ID análisis: {jobResult.result.analysis_id}</p>
+                    )}
+                  </div>
                 </div>
               </div>
+                );
+              })()
             )}
 
             {/* Actions */}

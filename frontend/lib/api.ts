@@ -30,6 +30,12 @@ export interface JobResult {
   explanation: string;
   model_version: string;
   reference: string;
+  ai_decision?: 'ai_generated' | 'not_ai_generated' | 'inconclusive';
+  analysis_id?: string;
+  decision_thresholds?: {
+    threshold_low: number;
+    threshold_high: number;
+  };
 }
 
 export interface JobResponse {
@@ -167,6 +173,28 @@ class ApiClient {
       const err = await res.json();
       throw new Error(err.detail || 'Error al consultar job');
     }
+    return res.json();
+  }
+
+  async submitFeedback(
+    analysisId: string,
+    label: 'ai_generated' | 'not_ai_generated',
+    comment?: string
+  ): Promise<any> {
+    const res = await fetch(`${API_BASE}/v1/history/${analysisId}/feedback`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.getHeaders(),
+      },
+      body: JSON.stringify({ label, comment }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Error enviando feedback');
+    }
+
     return res.json();
   }
 

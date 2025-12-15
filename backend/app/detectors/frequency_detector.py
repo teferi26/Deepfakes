@@ -39,7 +39,8 @@ class FrequencyDetector(BaseImageDetector):
     
     name = "frequency_analysis"
     version = "1.0.0"
-    default_weight = 0.15
+    # Peso reducido: se usa como señal complementaria, no principal
+    default_weight = 0.03
     
     _instance: Optional['FrequencyDetector'] = None
     _initialized: bool = False
@@ -142,31 +143,31 @@ class FrequencyDetector(BaseImageDetector):
         - Patrones periódicos en GANs por el upsampling
         - Menor simetría espectral en imágenes sintéticas
         """
-        score = 0.5  # Base neutral
+        score = 0.5  # Base neutral (queremos que sea muy conservador)
         
-        # Bajo ratio de frecuencias altas → probable fake
+        # Bajo ratio de frecuencias altas → probable fake (pero con efecto suave)
         if features["freq_ratio"] < 0.15:
-            score += 0.15
+            score += 0.10
         elif features["freq_ratio"] < 0.25:
-            score += 0.08
+            score += 0.04
         elif features["freq_ratio"] > 0.4:
-            score -= 0.1
+            score -= 0.05
         
         # Alta periodicidad → probable fake (artefactos de upsampling)
         if features["periodicity_score"] > 2.0:
-            score += 0.12
+            score += 0.08
         elif features["periodicity_score"] > 1.0:
-            score += 0.05
+            score += 0.03
         
         # Baja simetría espectral → probable fake
         if features["symmetry"] < 0.8:
-            score += 0.08
-        elif features["symmetry"] > 0.95:
-            score -= 0.05
-        
-        # Alta concentración DCT → señal de procesamiento
-        if features["dct_concentration"] > 0.7:
             score += 0.05
+        elif features["symmetry"] > 0.95:
+            score -= 0.03
+        
+        # Alta concentración DCT → señal de procesamiento (ligero)
+        if features["dct_concentration"] > 0.7:
+            score += 0.03
         
         return max(0.0, min(1.0, score))
     

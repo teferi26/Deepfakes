@@ -13,6 +13,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 from io import BytesIO
+import time
+import threading
 
 import torch
 import torch.nn as nn
@@ -20,6 +22,8 @@ import torch.nn.functional as F
 from PIL import Image
 
 from .base_detector import BaseImageDetector
+from ..database import SessionLocal
+from ..models import ModelArtifact
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,26 @@ class CLIPLinearClassifier(nn.Module):
         return self.fc(x)
 
 
+class CLIPMLPClassifier(nn.Module):
+    """2-layer MLP classifier for CLIP features.
+    
+    Architecture: input_dim -> hidden_dim -> 1 with ReLU and dropout.
+    This provides more expressiveness than a single linear layer.
+    """
+    
+    def __init__(self, input_dim: int = 768, hidden_dim: int = 256, dropout: float = 0.3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 class CLIPDetector(BaseImageDetector):
     """
     Detector basado en CLIP + clasificador lineal (UniversalFakeDetect).
@@ -63,7 +87,9 @@ class CLIPDetector(BaseImageDetector):
     
     name = "clip_universal"
     version = "1.0.0"
-    default_weight = 0.50  # Peso alto por su excelente generalización
+    # Le damos aún más peso en el ensemble porque es el detector
+    # con mejor capacidad de generalización entre modelos generativos.
+    default_weight = 0.70
     
     _instance: Optional['CLIPDetector'] = None
     _initialized: bool = False
@@ -83,6 +109,14 @@ class CLIPDetector(BaseImageDetector):
         self.classifier = None
         self.preprocess = None
         self._available = False
+
+        # Hot-reload: volver a consultar el head en DB cada N segundos.
+        # Nota: Celery prefork => cada proceso mantiene su propio cache.
+        self._head_lock = threading.Lock()
+        self._head_version: Optional[str] = None
+        self._head_source: str = "unknown"  # db | universal_fakedetect | untrained
+        self._head_last_checked_ts: float = 0.0
+        self._head_reload_seconds: float = float(os.getenv("CLIP_HEAD_RELOAD_SECONDS", "30"))
         
         try:
             self._load_model()
@@ -117,26 +151,103 @@ class CLIPDetector(BaseImageDetector):
         # Crear clasificador
         self.classifier = CLIPLinearClassifier(input_dim=feature_dim).to(self.device)
         
-        # Descargar/cargar pesos
-        self._ensure_weights_exist()
-        
-        if WEIGHTS_FILE.exists():
-            logger.info(f"Cargando pesos desde {WEIGHTS_FILE}")
-            state_dict = torch.load(WEIGHTS_FILE, map_location=self.device, weights_only=True)
-            
-            if 'fc.weight' not in state_dict and 'weight' in state_dict:
-                state_dict = {
-                    'fc.weight': state_dict['weight'],
-                    'fc.bias': state_dict['bias']
-                }
-            self.classifier.load_state_dict(state_dict)
-            logger.info("Pesos CLIP cargados correctamente")
-        else:
-            logger.warning("No se encontraron pesos CLIP, usando clasificador sin entrenar")
-            nn.init.zeros_(self.classifier.fc.weight)
-            nn.init.zeros_(self.classifier.fc.bias)
+        # 1) Preferir head entrenado en DB (clip_head_global)
+        trained_loaded = self._reload_head_from_db(force=True)
+
+        # 2) Fallback: pesos UniversalFakeDetect
+        if not trained_loaded:
+            self._ensure_weights_exist()
+
+            if WEIGHTS_FILE.exists():
+                logger.info(f"Cargando pesos desde {WEIGHTS_FILE}")
+                state_dict = torch.load(WEIGHTS_FILE, map_location=self.device, weights_only=True)
+
+                if 'fc.weight' not in state_dict and 'weight' in state_dict:
+                    state_dict = {
+                        'fc.weight': state_dict['weight'],
+                        'fc.bias': state_dict['bias']
+                    }
+                self.classifier.load_state_dict(state_dict)
+                self._head_version = "universal_fakedetect"
+                self._head_source = "universal_fakedetect"
+                logger.info("Pesos CLIP (UniversalFakeDetect) cargados correctamente")
+            else:
+                logger.warning("No se encontraron pesos CLIP, usando clasificador sin entrenar")
+                nn.init.zeros_(self.classifier.fc.weight)
+                nn.init.zeros_(self.classifier.fc.bias)
+                self._head_version = "untrained"
+                self._head_source = "untrained"
         
         self.classifier.eval()
+
+    def _reload_head_from_db(self, force: bool = False) -> bool:
+        """Hot reload del head desde DB si hay una versión más nueva.
+
+        - Si force=True, intenta cargar aunque no haya pasado el intervalo.
+        - Devuelve True si termina usando el head de DB (nuevo o ya vigente).
+        """
+        if not self.classifier:
+            return False
+
+        now = time.time()
+        if (not force) and (now - self._head_last_checked_ts) < self._head_reload_seconds:
+            return self._head_source == "db"
+
+        self._head_last_checked_ts = now
+
+        # Evitar múltiples consultas/cargas simultáneas en entornos con threads.
+        with self._head_lock:
+            try:
+                db = SessionLocal()
+                latest = (
+                    db.query(ModelArtifact)
+                    .filter(ModelArtifact.name == "clip_head_global")
+                    .order_by(ModelArtifact.created_at.desc())
+                    .first()
+                )
+                if not latest:
+                    return False
+
+                if self._head_source == "db" and self._head_version == latest.version:
+                    return True
+
+                payload = torch.load(BytesIO(latest.artifact), map_location=self.device)
+                state_dict = payload.get("state_dict")
+                if not state_dict:
+                    return False
+
+                # Detect architecture type from payload or state dict keys
+                architecture = payload.get("architecture", "linear")
+                in_dim = payload.get("in_dim", self.classifier.fc.in_features if hasattr(self.classifier, 'fc') else 768)
+                
+                if architecture == "MLP_2layer" or "net.0.weight" in state_dict:
+                    # New 2-layer MLP architecture
+                    hidden_dim = payload.get("hidden_dim", 256)
+                    dropout = payload.get("dropout", 0.3)
+                    new_classifier = CLIPMLPClassifier(
+                        input_dim=in_dim,
+                        hidden_dim=hidden_dim,
+                        dropout=dropout
+                    ).to(self.device)
+                    logger.info(f"Loading MLP head: in={in_dim}, hidden={hidden_dim}, dropout={dropout}")
+                else:
+                    # Legacy linear classifier
+                    new_classifier = CLIPLinearClassifier(input_dim=in_dim).to(self.device)
+                new_classifier.load_state_dict(state_dict)
+                new_classifier.eval()
+                self.classifier = new_classifier
+                self._head_version = latest.version
+                self._head_source = "db"
+                logger.info(f"Head CLIP entrenado recargado desde DB: clip_head_global v{latest.version}")
+                return True
+            except Exception as e:
+                logger.warning(f"No se pudo recargar head entrenado de DB: {e}")
+                return False
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
     
     def _ensure_weights_exist(self):
         """Descarga los pesos si no existen."""
@@ -169,6 +280,9 @@ class CLIPDetector(BaseImageDetector):
         """Analiza una imagen con CLIP."""
         if not self._available:
             raise RuntimeError("CLIPDetector no está disponible")
+
+        # Hot reload del head (si se entrenó uno nuevo) sin reiniciar el worker.
+        self._reload_head_from_db(force=False)
         
         try:
             # Cargar imagen
@@ -204,6 +318,8 @@ class CLIPDetector(BaseImageDetector):
                     "detector": self.name,
                     "model": f"CLIP-{CLIP_MODEL_NAME}",
                     "version": self.version,
+                    "head_version": self._head_version,
+                    "head_source": self._head_source,
                     "original_size": f"{original_size[0]}x{original_size[1]}",
                 }
             }
