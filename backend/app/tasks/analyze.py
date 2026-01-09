@@ -270,26 +270,89 @@ def _analyze_image(reference: str, start_time: float) -> dict:
 
 def _analyze_video(reference: str, start_time: float) -> dict:
     """
-    Analiza un video extrayendo frames y promediando resultados.
+    Analiza un video usando el VideoAIDetector especializado.
     
-    TODO: Implementar análisis de video completo con:
-    - Extracción de frames clave
-    - Detección de rostros
-    - Análisis temporal de inconsistencias
+    Características:
+    - Extracción de frames clave con muestreo temporal
+    - Análisis CLIP de cada frame
+    - Análisis de consistencia temporal (flickering, artefactos)
+    - Combinación de señales para decisión final
     """
     logger.info(f"Analizando video: {reference}")
     
-    # Por ahora, extraer primer frame y analizar como imagen
-    # En el futuro: analizar múltiples frames
     video_data = download_file(reference)
     if video_data is None:
         raise ValueError(f"No se pudo descargar el archivo: {reference}")
     
-    # Extraer frames del video
-    frames = _extract_video_frames(video_data, num_frames=5)
+    # Intentar usar el VideoAIDetector especializado
+    try:
+        from ..detectors.video_detector import get_video_detector
+        
+        video_detector = get_video_detector()
+        if video_detector.is_available():
+            # Determinar extensión del archivo
+            ext = ".mp4"
+            if reference.lower().endswith(".mov"):
+                ext = ".mov"
+            elif reference.lower().endswith(".avi"):
+                ext = ".avi"
+            elif reference.lower().endswith(".webm"):
+                ext = ".webm"
+            
+            result = video_detector.analyze_video_bytes(video_data, extension=ext)
+            elapsed = time.time() - start_time
+            
+            # Determinar tipo sospechado
+            prob = result["probability"]
+            if prob > 0.8:
+                suspected = "AI-generated video (Alta probabilidad)"
+            elif prob > 0.6:
+                suspected = "Probablemente generado por IA"
+            elif prob > 0.4:
+                suspected = "Posible manipulación (Inconcluso)"
+            else:
+                suspected = "Video probablemente auténtico"
+            
+            # Determinar nivel de confianza
+            confidence_val = result.get("confidence", 0.5)
+            if confidence_val > 0.7:
+                confidence = "high"
+            elif confidence_val > 0.4:
+                confidence = "medium"
+            else:
+                confidence = "low"
+            
+            details = result.get("details", {})
+            
+            return {
+                "probability": prob,
+                "media_type": "video",
+                "suspected": suspected,
+                "explanation": f"Análisis de {details.get('frames_analyzed', 0)} frames con CLIP + análisis temporal. "
+                              f"Probabilidad: {prob:.1%}. "
+                              f"Flickering score: {details.get('temporal_analysis', {}).get('flickering', 0):.2f}. "
+                              f"Consistencia temporal: {details.get('temporal_analysis', {}).get('temporal_score', 0):.2f}.",
+                "model_version": "video-ai-detector-v1",
+                "reference": reference,
+                "processing_time_seconds": round(elapsed, 2),
+                "is_synthetic": result.get("is_ai_generated", prob > 0.5),
+                "ai_decision": "ai_generated" if prob > 0.6 else ("not_ai_generated" if prob < 0.4 else "inconclusive"),
+                "confidence": confidence,
+                "video_analysis": {
+                    "frames_analyzed": details.get("frames_analyzed", 0),
+                    "frame_probabilities": details.get("frame_probabilities", []),
+                    "mean_frame_prob": details.get("mean_frame_prob", 0),
+                    "std_frame_prob": details.get("std_frame_prob", 0),
+                    "temporal_analysis": details.get("temporal_analysis", {}),
+                }
+            }
+    except Exception as e:
+        logger.warning(f"VideoAIDetector no disponible, usando fallback: {e}")
+    
+    # Fallback: análisis básico con extracción de frames
+    frames = _extract_video_frames(video_data, num_frames=8)
     
     if not frames:
-        # Fallback: análisis básico
         elapsed = time.time() - start_time
         return {
             "probability": 0.5,
@@ -304,7 +367,7 @@ def _analyze_video(reference: str, start_time: float) -> dict:
             "confidence": "low",
         }
     
-    # Analizar cada frame
+    # Analizar cada frame con el detector de imágenes
     detector = get_image_detector()
     probabilities = []
     
@@ -313,13 +376,11 @@ def _analyze_video(reference: str, start_time: float) -> dict:
         probabilities.append(result["probability"])
         logger.info(f"Frame {i+1}/{len(frames)}: {result['probability']:.3f}")
     
-    # Promediar resultados
     avg_probability = sum(probabilities) / len(probabilities)
     max_probability = max(probabilities)
     
     elapsed = time.time() - start_time
     
-    # Determinar confianza basada en varianza
     variance = sum((p - avg_probability) ** 2 for p in probabilities) / len(probabilities)
     if variance < 0.01:
         confidence = "high"
@@ -328,7 +389,6 @@ def _analyze_video(reference: str, start_time: float) -> dict:
     else:
         confidence = "low"
     
-    # Determinar tipo sospechado
     if avg_probability > 0.7:
         suspected = "AI-generated video (Deepfake probable)"
     elif avg_probability > 0.5:
