@@ -20,7 +20,7 @@ const ALLOWED_TYPES = [
   'video/webm',
 ];
 
-const MAX_SIZE_MB = 100;
+const MAX_SIZE_MB = 500; // 500 MB para soportar videos grandes
 
 type UploadState = 'idle' | 'uploading' | 'processing' | 'success' | 'error';
 

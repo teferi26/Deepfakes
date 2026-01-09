@@ -42,11 +42,11 @@ Base.metadata.create_all(bind=engine)
 
 # Límites de tamaño
 MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20 MB
-MAX_VIDEO_SIZE = 200 * 1024 * 1024  # 200 MB
+MAX_VIDEO_SIZE = 500 * 1024 * 1024  # 500 MB para videos grandes
 
 # Tipos MIME permitidos
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
-ALLOWED_VIDEO_TYPES = {"video/mp4", "video/quicktime", "video/x-msvideo"}
+ALLOWED_VIDEO_TYPES = {"video/mp4", "video/quicktime", "video/x-msvideo", "video/webm"}
 ALLOWED_TYPES = ALLOWED_IMAGE_TYPES | ALLOWED_VIDEO_TYPES
 
 app = FastAPI(title="Fraud Detector API", version="0.1.0")

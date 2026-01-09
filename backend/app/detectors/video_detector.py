@@ -113,20 +113,24 @@ class VideoAIDetector:
         import torch.nn as nn
         import pickle
         
-        # Definir la arquitectura del clasificador MLP
+        # Definir la arquitectura del clasificador MLP (V2 con BatchNorm)
         class VideoClassifier(nn.Module):
             def __init__(self, input_dim: int = 768):
                 super().__init__()
                 self.net = nn.Sequential(
                     nn.Linear(input_dim, 512),
+                    nn.BatchNorm1d(512),
+                    nn.ReLU(),
+                    nn.Dropout(0.4),
+                    nn.Linear(512, 256),
+                    nn.BatchNorm1d(256),
                     nn.ReLU(),
                     nn.Dropout(0.3),
-                    nn.Linear(512, 256),
+                    nn.Linear(256, 128),
+                    nn.BatchNorm1d(128),
                     nn.ReLU(),
                     nn.Dropout(0.2),
-                    nn.Linear(256, 64),
-                    nn.ReLU(),
-                    nn.Linear(64, 1)
+                    nn.Linear(128, 1)
                 )
             
             def forward(self, x):
@@ -144,10 +148,11 @@ class VideoAIDetector:
             
             cursor = conn.cursor()
             
-            # Intentar cargar de video_heads (modelo MLP robusto)
+            # Cargar modelo V2 (con BatchNorm) - priorizar el más reciente
             cursor.execute("""
                 SELECT model_data, accuracy, source 
                 FROM video_heads 
+                WHERE source LIKE 'video_ai_v2%%'
                 ORDER BY accuracy DESC, created_at DESC 
                 LIMIT 1
             """)

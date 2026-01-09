@@ -6,6 +6,7 @@ from .clip_detector import CLIPDetector
 from .cnn_detector import CNNDetector
 from .frequency_detector import FrequencyDetector
 from .metadata_detector import MetadataDetector
+from .video_detector import VideoAIDetector
 
 # Ensemble (combinación de todos los detectores)
 from .ensemble_detector import EnsembleDetector, ImageDetector
@@ -18,6 +19,7 @@ __all__ = [
     "CNNDetector", 
     "FrequencyDetector",
     "MetadataDetector",
+    "VideoAIDetector",
     # Ensemble
     "EnsembleDetector",
     "ImageDetector",  # Alias de EnsembleDetector para compatibilidad
