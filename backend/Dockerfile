@@ -1,4 +1,21 @@
-FROM python:3.11-slim
+FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
+
+# Evitar prompts interactivos
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Europe/Madrid
+
+# Instalar Python 3.11
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    tzdata \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && python -m ensurepip --upgrade \
+    && python -m pip install --upgrade pip
 
 WORKDIR /app
 

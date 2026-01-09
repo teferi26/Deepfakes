@@ -184,8 +184,21 @@ class EnsembleDetector(BaseImageDetector):
             float(raw_probability), float(prob_std),
         ]
 
-        calibrated_probability = self._calibrator.predict_probability(features)
-        final_probability = calibrated_probability if calibrated_probability is not None else raw_probability
+        # IMPORTANTE: El calibrador fue entrenado con datos antiguos y puede
+        # no funcionar bien con el nuevo modelo CLIP entrenado.
+        # Por ahora, usamos directamente la probabilidad del CLIP como valor principal
+        # ya que es el detector más robusto (peso 0.70) y está recién entrenado.
+        import os
+        use_clip_directly = os.getenv("USE_CLIP_DIRECTLY", "true").lower() == "true"
+        
+        if use_clip_directly and m_clip > 0:
+            # Usar probabilidad CLIP directamente (ignorar calibrador y otros detectores)
+            final_probability = p_clip
+            logger.debug(f"Usando CLIP directamente: {p_clip:.3f}")
+        else:
+            # Fallback: usar calibrador o raw probability
+            calibrated_probability = self._calibrator.predict_probability(features)
+            final_probability = calibrated_probability if calibrated_probability is not None else raw_probability
         
         # Determinar veredicto IA/no-IA y tipo sospechado basado en probabilidad
         # Umbrales AJUSTADOS para reducir tasa de inconclusive (target ≤3%):

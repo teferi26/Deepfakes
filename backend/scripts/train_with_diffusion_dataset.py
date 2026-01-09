@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Script para entrenar el modelo CLIP head con datasets modernos de IA.
+Script para entrenar el modelo CLIP head con imágenes de Stable Diffusion (DiffusionDB).
 
-Usa el dataset Hemg/AI-Generated-vs-Real-Images-Datasets de HuggingFace
-que contiene ~152K imágenes de AI Art vs Real Images.
+Combina:
+- Imágenes AI de DiffusionDB (Stable Diffusion)
+- Imágenes reales del dataset Hemg
 
 Uso:
-    python scripts/train_with_modern_dataset.py --max-samples 50000 --batch-size 64
+    python scripts/train_with_diffusion_dataset.py --ai-samples 25000 --real-samples 25000 --save
 """
 
 import os
@@ -31,98 +32,87 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def check_dependencies():
-    """Verificar que las dependencias están instaladas."""
-    try:
-        from datasets import load_dataset
-        import open_clip
-        logger.info("✓ Dependencias OK")
-        return True
-    except ImportError as e:
-        logger.error(f"Falta dependencia: {e}")
-        logger.info("Instala con: pip install datasets open_clip_torch")
-        return False
-
-
-class ModernAIDataset(Dataset):
-    """Dataset para imágenes modernas de IA vs Reales."""
+class CombinedDataset(Dataset):
+    """Dataset que combina imágenes AI (DiffusionDB) con imágenes reales (Hemg)."""
     
     def __init__(
         self,
-        hf_dataset,
+        ai_dataset,
+        real_dataset,
         preprocess,
-        max_samples: Optional[int] = None,
-        split: str = "train"
+        ai_samples: int = 25000,
+        real_samples: int = 25000
     ):
         self.preprocess = preprocess
-        self.hf_dataset = hf_dataset
-        self.indices = []
-        self.labels_cache = []
+        self.samples = []  # Lista de (dataset, index, label)
         
-        logger.info(f"Indexando dataset (max_samples={max_samples})...")
+        logger.info(f"Preparando dataset combinado...")
+        logger.info(f"  AI samples target: {ai_samples}")
+        logger.info(f"  Real samples target: {real_samples}")
         
-        # El dataset Hemg/AI-Generated-vs-Real-Images-Datasets tiene:
-        # label: 0 = AiArtData (IA), 1 = RealArt (Real)
-        # Para nuestro modelo: 1 = AI, 0 = Real
-        # Por tanto: invertir el label
-        for i, item in enumerate(hf_dataset):
-            if max_samples and i >= max_samples:
+        # Añadir imágenes AI de DiffusionDB (todas son AI, label=1)
+        ai_count = 0
+        for i, item in enumerate(ai_dataset):
+            if ai_count >= ai_samples:
                 break
-            
             try:
-                image = item.get('image')
-                if image is None:
-                    continue
-                    
-                label_raw = item.get('label', item.get('class', 0))
-                
-                # Dataset usa: 0=AI, 1=Real
-                # Nuestro modelo usa: 1=AI, 0=Real
-                # Por tanto: invertir (1 - label_raw)
-                if isinstance(label_raw, str):
-                    label = 1 if 'ai' in label_raw.lower() or 'gen' in label_raw.lower() else 0
-                else:
-                    # Hemg dataset: 0=AI, 1=Real -> invertir a 1=AI, 0=Real
-                    label = 1 - int(label_raw)
-                
-                self.indices.append(i)
-                self.labels_cache.append(label)
-                    
-                if (len(self.indices)) % 10000 == 0:
-                    logger.info(f"  Indexadas {len(self.indices)} imágenes...")
-                    
-            except Exception as e:
+                if item.get('image') is not None:
+                    self.samples.append(('ai', i, 1))
+                    ai_count += 1
+                    if ai_count % 5000 == 0:
+                        logger.info(f"  Indexadas {ai_count} imágenes AI...")
+            except:
                 continue
         
-        # Contar distribución
-        ai_count = sum(1 for l in self.labels_cache if l == 1)
-        real_count = len(self.labels_cache) - ai_count
-        logger.info(f"Dataset indexado: {len(self.indices)} total, {ai_count} AI, {real_count} Real")
+        logger.info(f"  ✓ {ai_count} imágenes AI indexadas")
+        
+        # Añadir imágenes reales del dataset Hemg (label=1 en Hemg = Real, nuestro label=0)
+        real_count = 0
+        for i, item in enumerate(real_dataset):
+            if real_count >= real_samples:
+                break
+            try:
+                if item.get('image') is not None and item.get('label') == 1:  # label=1 = Real en Hemg
+                    self.samples.append(('real', i, 0))
+                    real_count += 1
+                    if real_count % 5000 == 0:
+                        logger.info(f"  Indexadas {real_count} imágenes reales...")
+            except:
+                continue
+        
+        logger.info(f"  ✓ {real_count} imágenes reales indexadas")
+        
+        # Guardar referencias a los datasets
+        self.ai_dataset = ai_dataset
+        self.real_dataset = real_dataset
+        
+        # Shuffle
+        random.shuffle(self.samples)
+        
+        logger.info(f"Dataset combinado: {len(self.samples)} total ({ai_count} AI + {real_count} Real)")
     
     def __len__(self):
-        return len(self.indices)
+        return len(self.samples)
     
     def __getitem__(self, idx):
-        # Cargar imagen bajo demanda
-        hf_idx = self.indices[idx]
-        label = self.labels_cache[idx]
+        source, data_idx, label = self.samples[idx]
         
         try:
-            item = self.hf_dataset[hf_idx]
-            image = item.get('image')
+            if source == 'ai':
+                item = self.ai_dataset[data_idx]
+            else:
+                item = self.real_dataset[data_idx]
             
+            image = item.get('image')
             if image is None:
                 return torch.zeros(3, 224, 224), torch.tensor(0.0)
             
-            # Convertir a RGB si es necesario
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             
-            # Aplicar preprocesamiento CLIP
             image_tensor = self.preprocess(image)
             return image_tensor, torch.tensor(label, dtype=torch.float32)
         except Exception as e:
-            # Imagen dummy en caso de error
             return torch.zeros(3, 224, 224), torch.tensor(0.0)
 
 
@@ -141,7 +131,6 @@ def extract_clip_features(
         for batch_idx, (images, labels) in enumerate(dataloader):
             images = images.to(device)
             
-            # Extraer features
             features = model.encode_image(images)
             features = features / features.norm(dim=-1, keepdim=True)
             
@@ -160,28 +149,26 @@ def train_linear_head(
     val_features: np.ndarray,
     val_labels: np.ndarray,
     device: str,
-    learning_rate: float = 0.05,
-    epochs: int = 20,
+    learning_rate: float = 0.1,
+    epochs: int = 30,
     batch_size: int = 256
 ) -> Tuple[nn.Module, dict]:
-    """Entrena un head linear simple (como el modelo que funcionaba)."""
+    """Entrena un head linear."""
     
     input_dim = train_features.shape[1]
-    logger.info(f"Entrenando head linear: input_dim={input_dim}, lr={learning_rate}")
+    logger.info(f"Entrenando head linear: input_dim={input_dim}, lr={learning_rate}, epochs={epochs}")
     
-    # Crear clasificador linear simple
     classifier = nn.Sequential(
         nn.Linear(input_dim, 1)
     ).to(device)
     
-    # Convertir a tensores
     X_train = torch.tensor(train_features, dtype=torch.float32).to(device)
     y_train = torch.tensor(train_labels, dtype=torch.float32).to(device)
     X_val = torch.tensor(val_features, dtype=torch.float32).to(device)
     y_val = torch.tensor(val_labels, dtype=torch.float32).to(device)
     
-    # Optimizer y loss
-    optimizer = torch.optim.SGD(classifier.parameters(), lr=learning_rate, momentum=0.9)
+    optimizer = torch.optim.SGD(classifier.parameters(), lr=learning_rate, momentum=0.9, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = nn.BCEWithLogitsLoss()
     
     best_val_acc = 0.0
@@ -190,7 +177,6 @@ def train_linear_head(
     for epoch in range(epochs):
         classifier.train()
         
-        # Mini-batch training
         indices = torch.randperm(len(X_train))
         total_loss = 0.0
         
@@ -207,6 +193,8 @@ def train_linear_head(
             
             total_loss += loss.item()
         
+        scheduler.step()
+        
         # Validación
         classifier.eval()
         with torch.no_grad():
@@ -218,20 +206,16 @@ def train_linear_head(
             train_preds = (torch.sigmoid(train_outputs) > 0.5).float()
             train_acc = (train_preds == y_train).float().mean().item()
         
-        avg_loss = total_loss / (len(X_train) // batch_size)
-        
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_state = {k: v.clone() for k, v in classifier.state_dict().items()}
         
         if (epoch + 1) % 5 == 0:
-            logger.info(f"Epoch {epoch + 1}/{epochs}: loss={avg_loss:.4f}, train_acc={train_acc:.4f}, val_acc={val_acc:.4f}")
+            logger.info(f"Epoch {epoch + 1}/{epochs}: loss={total_loss/(len(X_train)//batch_size):.4f}, train_acc={train_acc:.4f}, val_acc={val_acc:.4f}")
     
-    # Restaurar mejor modelo
     if best_state:
         classifier.load_state_dict(best_state)
     
-    # Evaluación final
     classifier.eval()
     with torch.no_grad():
         val_outputs = classifier(X_val).squeeze()
@@ -249,7 +233,8 @@ def train_linear_head(
         'n_val': len(val_labels),
         'learning_rate': learning_rate,
         'epochs': epochs,
-        'architecture': 'linear'
+        'architecture': 'linear',
+        'dataset': 'diffusiondb+hemg'
     }
     
     logger.info(f"Entrenamiento completado: val_acc={final_val_acc:.4f}, train_acc={final_train_acc:.4f}")
@@ -263,10 +248,8 @@ def save_model_to_db(classifier: nn.Module, metrics: dict, input_dim: int):
     from app.database import SessionLocal
     from app.models import ModelArtifact
     
-    # Preparar state dict para el formato esperado por CLIPDetector
     state_dict = {}
     for name, param in classifier.named_parameters():
-        # Convertir nombres: 0.weight -> fc.weight
         new_name = name.replace('0.', 'fc.')
         state_dict[new_name] = param.data.clone()
     
@@ -277,12 +260,10 @@ def save_model_to_db(classifier: nn.Module, metrics: dict, input_dim: int):
         'metrics': metrics
     }
     
-    # Serializar
     buffer = BytesIO()
     torch.save(payload, buffer)
     artifact_bytes = buffer.getvalue()
     
-    # Guardar en DB
     version = datetime.utcnow().strftime('%Y%m%d%H%M%S')
     
     db = SessionLocal()
@@ -297,24 +278,22 @@ def save_model_to_db(classifier: nn.Module, metrics: dict, input_dim: int):
         db.commit()
         
         logger.info(f"✓ Modelo guardado: clip_head_global v{version}")
-        logger.info(f"  Métricas: val_acc={metrics['val_acc']:.4f}, train_acc={metrics['train_acc']:.4f}")
-        
         return version
     finally:
         db.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Entrenar CLIP head con dataset moderno de IA')
-    parser.add_argument('--dataset', default='Hemg/AI-Generated-vs-Real-Images-Datasets',
-                        help='Dataset de HuggingFace')
-    parser.add_argument('--max-samples', type=int, default=100000,
-                        help='Máximo de samples a usar (default: 100000)')
+    parser = argparse.ArgumentParser(description='Entrenar CLIP head con DiffusionDB + imágenes reales')
+    parser.add_argument('--ai-samples', type=int, default=25000,
+                        help='Número de imágenes AI de DiffusionDB')
+    parser.add_argument('--real-samples', type=int, default=25000,
+                        help='Número de imágenes reales de Hemg')
     parser.add_argument('--batch-size', type=int, default=64,
-                        help='Batch size para extracción de features')
-    parser.add_argument('--lr', type=float, default=0.05,
-                        help='Learning rate (default: 0.05)')
-    parser.add_argument('--epochs', type=int, default=20,
+                        help='Batch size para extracción')
+    parser.add_argument('--lr', type=float, default=0.1,
+                        help='Learning rate')
+    parser.add_argument('--epochs', type=int, default=30,
                         help='Epochs de entrenamiento')
     parser.add_argument('--val-split', type=float, default=0.2,
                         help='Proporción de validación')
@@ -323,17 +302,13 @@ def main():
     
     args = parser.parse_args()
     
-    if not check_dependencies():
-        sys.exit(1)
-    
     from datasets import load_dataset
     import open_clip
     
-    # Determinar dispositivo
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Usando dispositivo: {device}")
     
-    # Cargar modelo CLIP
+    # Cargar CLIP
     logger.info("Cargando CLIP ViT-L-14...")
     model, _, preprocess = open_clip.create_model_and_transforms(
         'ViT-L-14',
@@ -343,29 +318,34 @@ def main():
     model.eval()
     logger.info("✓ CLIP cargado")
     
-    # Cargar dataset
-    logger.info(f"Descargando dataset: {args.dataset}")
-    logger.info("(Esto puede tardar unos minutos la primera vez...)")
+    # Cargar datasets
+    logger.info("Descargando DiffusionDB (imágenes AI de Stable Diffusion)...")
+    # Usar 2m_random_10k para descarga más rápida y estable
+    ai_dataset = load_dataset('poloclub/diffusiondb', '2m_random_10k', 
+                               trust_remote_code=True, split='train')
+    logger.info(f"✓ DiffusionDB cargado: {len(ai_dataset)} imágenes")
     
-    hf_dataset = load_dataset(args.dataset, split='train', streaming=False)
-    logger.info(f"✓ Dataset descargado: {len(hf_dataset)} imágenes")
+    logger.info("Descargando Hemg dataset (imágenes reales)...")
+    real_dataset = load_dataset('Hemg/AI-Generated-vs-Real-Images-Datasets', split='train')
+    logger.info(f"✓ Hemg cargado: {len(real_dataset)} imágenes")
     
-    # IMPORTANTE: Shuffle del dataset (está ordenado por clase)
-    hf_dataset = hf_dataset.shuffle(seed=42)
-    logger.info("✓ Dataset shuffled")
+    # Shuffle datasets
+    ai_dataset = ai_dataset.shuffle(seed=42)
+    real_dataset = real_dataset.shuffle(seed=42)
     
-    # Crear dataset
-    dataset = ModernAIDataset(
-        hf_dataset,
+    # Crear dataset combinado
+    dataset = CombinedDataset(
+        ai_dataset,
+        real_dataset,
         preprocess,
-        max_samples=args.max_samples
+        ai_samples=args.ai_samples,
+        real_samples=args.real_samples
     )
     
     if len(dataset) == 0:
         logger.error("Dataset vacío!")
         sys.exit(1)
     
-    # DataLoader
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -392,9 +372,16 @@ def main():
     val_features = features[val_indices]
     val_labels = labels[val_indices]
     
-    logger.info(f"Split: {len(train_labels)} train, {len(val_labels)} val")
+    # Mostrar distribución
+    train_ai = sum(train_labels)
+    train_real = len(train_labels) - train_ai
+    val_ai = sum(val_labels)
+    val_real = len(val_labels) - val_ai
     
-    # Entrenar head linear
+    logger.info(f"Split: {len(train_labels)} train ({int(train_ai)} AI, {int(train_real)} Real)")
+    logger.info(f"       {len(val_labels)} val ({int(val_ai)} AI, {int(val_real)} Real)")
+    
+    # Entrenar
     classifier, metrics = train_linear_head(
         train_features, train_labels,
         val_features, val_labels,
@@ -403,19 +390,18 @@ def main():
         epochs=args.epochs
     )
     
-    # Guardar modelo
+    # Guardar
     if args.save:
         version = save_model_to_db(classifier, metrics, features.shape[1])
         logger.info(f"\n🎉 Modelo guardado exitosamente!")
         logger.info(f"   Versión: {version}")
         logger.info(f"   Val Accuracy: {metrics['val_acc']*100:.1f}%")
-        logger.info(f"   Train Accuracy: {metrics['train_acc']*100:.1f}%")
+        logger.info(f"   Dataset: DiffusionDB (Stable Diffusion) + Hemg (Real)")
         logger.info(f"\n   Para usar el nuevo modelo, reinicia el worker:")
         logger.info(f"   docker-compose restart worker")
     else:
         logger.info("\n✓ Entrenamiento completado (sin guardar)")
         logger.info(f"   Val Accuracy: {metrics['val_acc']*100:.1f}%")
-        logger.info(f"   Para guardar, usa --save")
 
 
 if __name__ == '__main__':
